@@ -1,6 +1,7 @@
 /**
  * Web Audio API Engine for BEAT FREEZE
- * Supports real PCM audio waveform extraction, 45-second capped showcase playback, and UI sound effects.
+ * Supports real PCM audio waveform extraction, 45-second capped showcase playback with fade-out,
+ * and UI sound effects.
  */
 
 class AudioEngine {
@@ -12,6 +13,7 @@ class AudioEngine {
   // Real audio playback state
   private currentAudioElement: HTMLAudioElement | null = null;
   private playbackTimer: number | null = null;
+  private fadeTimer: number | null = null;
 
   private init() {
     if (!this.ctx) {
@@ -145,11 +147,11 @@ class AudioEngine {
 
   /**
    * Decodes an uploaded audio file (MP3 / WAV / OGG) and extracts real PCM amplitude peaks
-   * for a standstill audio waveform matching real DAW sound editors.
+   * for a smooth, detailed standstill audio waveform.
    */
   public async decodeAudioFile(
     file: File,
-    peaksCount = 140
+    peaksCount = 200
   ): Promise<{ peaks: number[]; duration: number; audioUrl: string }> {
     this.init();
     const arrayBuffer = await file.arrayBuffer();
@@ -159,7 +161,6 @@ class AudioEngine {
 
     try {
       if (this.ctx) {
-        // Clone buffer as decodeAudioData detaches the arrayBuffer
         const bufferCopy = arrayBuffer.slice(0);
         const audioBuffer = await this.ctx.decodeAudioData(bufferCopy);
         duration = audioBuffer.duration;
@@ -171,17 +172,20 @@ class AudioEngine {
           const start = i * step;
           const end = start + step;
           let max = 0;
-          for (let j = start; j < end; j += 10) {
-            const val = Math.abs(channelData[j]);
+          let min = 0;
+          // Sample every few frames for detail
+          for (let j = start; j < end; j += Math.max(1, Math.floor(step / 50))) {
+            const val = channelData[j];
             if (val > max) max = val;
+            if (val < min) min = val;
           }
-          // Normalize and scale between 0.12 and 1.0
-          const normalized = Math.max(0.12, Math.min(1.0, max * 1.5));
-          peaks.push(Number(normalized.toFixed(3)));
+          // Use the larger of |max| or |min| for a more accurate peak
+          const peak = Math.max(Math.abs(max), Math.abs(min));
+          const normalized = Math.max(0.05, Math.min(1.0, peak * 1.3));
+          peaks.push(Number(normalized.toFixed(4)));
         }
       }
-    } catch (err) {
-      // Fallback procedural waveform if file decode is not supported in environment
+    } catch {
       peaks = this.generateFallbackPeaks(file.name, peaksCount);
     }
 
@@ -192,7 +196,7 @@ class AudioEngine {
   /**
    * Generates procedural realistic soundwave amplitude peaks when no file is uploaded.
    */
-  public generateFallbackPeaks(seed: string, count = 140): number[] {
+  public generateFallbackPeaks(seed: string, count = 200): number[] {
     let hash = 0;
     for (let i = 0; i < seed.length; i++) {
       hash = (hash << 5) - hash + seed.charCodeAt(i);
@@ -201,51 +205,72 @@ class AudioEngine {
 
     const peaks: number[] = [];
     for (let i = 0; i < count; i++) {
-      const envelope = Math.sin((i / count) * Math.PI); // Attack and release
+      const envelope = Math.sin((i / count) * Math.PI);
       const harmonic1 = Math.sin((i * 0.4 + hash) * 0.8) * 0.35;
       const harmonic2 = Math.cos((i * 1.2 + hash) * 0.5) * 0.25;
       const noise = (Math.random() - 0.5) * 0.18;
       const base = 0.45 + harmonic1 + harmonic2 + noise;
       const val = Math.max(0.12, Math.min(0.98, base * (0.4 + 0.6 * envelope)));
-      peaks.push(Number(val.toFixed(3)));
+      peaks.push(Number(val.toFixed(4)));
     }
     return peaks;
   }
 
   /**
-   * Plays uploaded audio with a hard cap of 45 seconds maximum!
+   * Plays uploaded audio with a hard cap of 45 seconds, trim support, and fade-out at the cutoff.
+   * trimStart/trimEnd define the playable window in seconds.
+   * The fade-out starts 2 seconds before the end of the playable window (or 45s cap, whichever is first).
    */
   public playShowcaseAudio(
     audioUrl: string,
     onProgress: (elapsed: number, progressPct: number) => void,
     onEnded: () => void,
-    startOffset = 0
+    startOffset = 0,
+    trimStart = 0,
+    trimEnd?: number
   ) {
     this.stopAudio();
 
     const audio = new Audio(audioUrl);
     this.currentAudioElement = audio;
     audio.volume = this.isMuted ? 0 : this.currentVolume;
-    audio.currentTime = startOffset;
 
     const maxSeconds = 45;
+    const effectiveTrimEnd = trimEnd ?? maxSeconds;
+    // The actual end point is whichever comes first: trim end or 45s cap
+    const playEndSeconds = Math.min(effectiveTrimEnd, maxSeconds);
+    const playStartSeconds = Math.min(trimStart, playEndSeconds - 1);
 
+    // Fade-out starts 2s before the end
+    const fadeStart = Math.max(playStartSeconds, playEndSeconds - 2);
+    const fadeDuration = playEndSeconds - fadeStart;
+
+    audio.currentTime = playStartSeconds + startOffset;
     audio.play().catch(() => {});
+
+    const baseVolume = this.isMuted ? 0 : this.currentVolume;
 
     this.playbackTimer = window.setInterval(() => {
       if (!this.currentAudioElement) return;
-      const current = this.currentAudioElement.currentTime;
+      const current = this.currentAudioElement.currentTime - playStartSeconds;
 
-      if (current >= maxSeconds || this.currentAudioElement.ended) {
+      // Apply fade-out
+      if (current >= fadeStart && fadeDuration > 0) {
+        const fadeProgress = (current - fadeStart) / fadeDuration;
+        const fadedVol = baseVolume * (1 - Math.min(1, fadeProgress));
+        this.currentAudioElement.volume = Math.max(0, fadedVol);
+      }
+
+      if (current >= playEndSeconds || this.currentAudioElement.ended) {
         this.stopAudio();
-        onProgress(maxSeconds, 100);
+        onProgress(playEndSeconds, 100);
         onEnded();
         return;
       }
 
-      const progress = (current / maxSeconds) * 100;
+      const progress = (current / playEndSeconds) * 100;
       onProgress(current, progress);
-    }, 100);
+    }, 50);
 
     audio.onended = () => {
       this.stopAudio();
@@ -257,6 +282,10 @@ class AudioEngine {
     if (this.playbackTimer !== null) {
       clearInterval(this.playbackTimer);
       this.playbackTimer = null;
+    }
+    if (this.fadeTimer !== null) {
+      clearInterval(this.fadeTimer);
+      this.fadeTimer = null;
     }
     if (this.currentAudioElement) {
       this.currentAudioElement.pause();

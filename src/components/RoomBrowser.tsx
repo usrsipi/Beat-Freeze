@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Room, BattleGenre } from '../types/game';
-import { Plus, Radio, Clock, Users, ArrowRight, ArrowLeft, Lock, Music } from 'lucide-react';
+import { Plus, Radio, Clock, Users, ArrowRight, ArrowLeft, Lock, Music, Lightbulb, Send, Check, Loader2, X } from 'lucide-react';
 import { audioEngine } from '../services/audioEngine';
 import { generateRoomCode } from '../game/battleEngine';
 
@@ -11,6 +11,16 @@ interface RoomBrowserProps {
   onBackToMenu: () => void;
 }
 
+const TIMER_PRESETS = [
+  { label: '3 Minutes', value: 180 },
+  { label: '5 Minutes', value: 300 },
+  { label: '10 Minutes', value: 600 },
+  { label: '15 Minutes', value: 900 },
+  { label: '20 Minutes', value: 1200 },
+];
+
+const MAX_TIMER_SECONDS = 1200; // 20 minutes hard cap
+
 export const RoomBrowser: React.FC<RoomBrowserProps> = ({
   rooms,
   onSelectRoom,
@@ -19,6 +29,7 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
 }) => {
   const [roomCodeInput, setRoomCodeInput] = useState<string>('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
+  const [isGenreSuggestOpen, setIsGenreSuggestOpen] = useState<boolean>(false);
 
   // New room form
   const [newRoomName, setNewRoomName] = useState<string>('Glacial Phonk Arena');
@@ -26,6 +37,18 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
   const [newTimerSeconds, setNewTimerSeconds] = useState<number>(300);
   const [newMaxPlayers, setNewMaxPlayers] = useState<number>(8);
   const [newIsPrivate, setNewIsPrivate] = useState<boolean>(false);
+
+  // Custom timer state
+  const [useCustomTimer, setUseCustomTimer] = useState<boolean>(false);
+  const [customTimerMinutes, setCustomTimerMinutes] = useState<number>(5);
+
+  // Genre suggestion form state
+  const [genreName, setGenreName] = useState<string>('');
+  const [genreDescription, setGenreDescription] = useState<string>('');
+  const [genreExampleUrl, setGenreExampleUrl] = useState<string>('');
+  const [genreSubmitting, setGenreSubmitting] = useState<boolean>(false);
+  const [genreSubmitted, setGenreSubmitted] = useState<boolean>(false);
+  const [genreError, setGenreError] = useState<string>('');
 
   const handleJoinByCode = (e: React.FormEvent) => {
     e.preventDefault();
@@ -58,6 +81,11 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
   const handleCreateSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     audioEngine.playReadyUp();
+
+    const timerSeconds = useCustomTimer
+      ? Math.min(Math.max(1, customTimerMinutes), 20) * 60
+      : newTimerSeconds;
+
     const code = generateRoomCode();
     const created: Room = {
       id: `room-${Date.now()}`,
@@ -68,13 +96,60 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
       status: 'Open',
       playerCount: 1,
       maxPlayers: newMaxPlayers,
-      roundTimerSeconds: newTimerSeconds,
+      roundTimerSeconds: timerSeconds,
       isPrivate: newIsPrivate,
       players: [],
     };
     onCreateRoom(created);
     setIsCreateModalOpen(false);
     onSelectRoom(created);
+  };
+
+  const handleGenreSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setGenreError('');
+
+    if (!genreName.trim()) {
+      setGenreError('Please enter a genre name.');
+      return;
+    }
+    if (!genreExampleUrl.trim()) {
+      setGenreError('Please provide an example link (YouTube or audio file).');
+      return;
+    }
+
+    setGenreSubmitting(true);
+
+    try {
+      const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+      const response = await fetch(`${supabaseUrl}/functions/v1/genre-suggestion`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
+        },
+        body: JSON.stringify({
+          genreName: genreName.trim(),
+          description: genreDescription.trim(),
+          exampleUrl: genreExampleUrl.trim(),
+        }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || `Request failed (${response.status})`);
+      }
+
+      setGenreSubmitted(true);
+      setGenreName('');
+      setGenreDescription('');
+      setGenreExampleUrl('');
+      audioEngine.playReadyUp();
+    } catch (err) {
+      setGenreError(err instanceof Error ? err.message : 'Failed to submit. Please try again.');
+    } finally {
+      setGenreSubmitting(false);
+    }
   };
 
   const genres: BattleGenre[] = ['Trap', 'Phonk', 'Cyberpunk', 'Drill', 'Lo-Fi', 'Hyperpop'];
@@ -104,7 +179,7 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
           </div>
         </div>
 
-        {/* Join by Code Form & Create Button */}
+        {/* Join by code Form & Create Button */}
         <div className="flex flex-wrap items-center gap-3">
           <form onSubmit={handleJoinByCode} className="flex items-center gap-1.5 bg-[#08101e] p-1 rounded-lg border border-cyan-500/30">
             <input
@@ -206,10 +281,26 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
         )}
       </div>
 
+      {/* Suggest a Genre button - always visible at bottom */}
+      <div className="mt-8 flex justify-center">
+        <button
+          onClick={() => {
+            audioEngine.playUiClick();
+            setGenreSubmitted(false);
+            setGenreError('');
+            setIsGenreSuggestOpen(true);
+          }}
+          className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#08101e] hover:bg-[#0c1830] border border-cyan-500/30 hover:border-cyan-400 text-cyan-300 font-arcade text-xs uppercase tracking-wider transition-colors"
+        >
+          <Lightbulb size={14} className="text-amber-400" />
+          Suggest a Genre
+        </button>
+      </div>
+
       {/* Create Custom Room Modal */}
       {isCreateModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
-          <div className="w-full max-w-lg bg-[#08101e] border border-cyan-500/40 p-6 rounded-xl cryo-card-shadow text-white">
+          <div className="w-full max-w-lg bg-[#08101e] border border-cyan-500/40 p-6 rounded-xl cryo-card-shadow text-white max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center pb-3 border-b border-cyan-500/20 mb-4">
               <h3 className="font-arcade text-lg font-bold text-cyan-300 uppercase flex items-center gap-2">
                 <Plus size={18} /> Host Battle Room
@@ -254,16 +345,52 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
                 <div>
                   <label className="block text-xs font-code text-slate-400 mb-1">Timer</label>
                   <select
-                    value={newTimerSeconds}
-                    onChange={(e) => setNewTimerSeconds(parseInt(e.target.value, 10))}
+                    value={useCustomTimer ? 'custom' : newTimerSeconds}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === 'custom') {
+                        setUseCustomTimer(true);
+                      } else {
+                        setUseCustomTimer(false);
+                        setNewTimerSeconds(parseInt(val, 10));
+                      }
+                    }}
                     className="w-full px-3 py-2 rounded bg-[#020408] border border-cyan-500/30 font-code text-xs text-cyan-300 focus:outline-none focus:border-cyan-400"
                   >
-                    <option value={180}>3 Minutes</option>
-                    <option value={300}>5 Minutes</option>
-                    <option value={600}>10 Minutes</option>
+                    {TIMER_PRESETS.map((t) => (
+                      <option key={t.value} value={t.value}>
+                        {t.label}
+                      </option>
+                    ))}
+                    <option value="custom">Custom (1–20 min)</option>
                   </select>
                 </div>
               </div>
+
+              {/* Custom timer input */}
+              {useCustomTimer && (
+                <div className="p-3 rounded-lg bg-[#020408] border border-cyan-500/30">
+                  <label className="block text-xs font-code text-slate-400 mb-2">
+                    Custom Timer (minutes) — Max 20 minutes
+                  </label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="range"
+                      min={1}
+                      max={20}
+                      value={customTimerMinutes}
+                      onChange={(e) => setCustomTimerMinutes(parseInt(e.target.value, 10))}
+                      className="flex-1 accent-cyan-400 cursor-pointer"
+                    />
+                    <span className="font-arcade text-lg font-bold text-cyan-300 tabular-nums w-16 text-right">
+                      {customTimerMinutes}m
+                    </span>
+                  </div>
+                  <div className="mt-2 text-[10px] font-code text-slate-500">
+                    {customTimerMinutes} minutes = {customTimerMinutes * 60} seconds
+                  </div>
+                </div>
+              )}
 
               <div className="pt-3 border-t border-cyan-500/20 flex justify-end gap-3">
                 <button
@@ -281,6 +408,130 @@ export const RoomBrowser: React.FC<RoomBrowserProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Genre Suggestion Modal */}
+      {isGenreSuggestOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-[#08101e] border border-cyan-500/40 p-6 rounded-xl cryo-card-shadow text-white max-h-[90vh] overflow-y-auto">
+            <div className="flex justify-between items-center pb-3 border-b border-cyan-500/20 mb-4">
+              <h3 className="font-arcade text-lg font-bold text-cyan-300 uppercase flex items-center gap-2">
+                <Lightbulb size={18} className="text-amber-400" /> Suggest a Genre
+              </h3>
+              <button
+                onClick={() => setIsGenreSuggestOpen(false)}
+                className="text-slate-400 hover:text-white font-code text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {genreSubmitted ? (
+              <div className="text-center py-8">
+                <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-emerald-950 border-2 border-emerald-400 mb-4">
+                  <Check size={32} className="text-emerald-400" />
+                </div>
+                <h4 className="font-arcade text-lg font-bold text-white uppercase mb-2">
+                  Suggestion Sent!
+                </h4>
+                <p className="text-xs font-code text-slate-400 max-w-xs mx-auto">
+                  Your genre suggestion has been sent to the BEAT FREEZE team. Thank you for contributing!
+                </p>
+                <button
+                  onClick={() => {
+                    audioEngine.playUiClick();
+                    setIsGenreSuggestOpen(false);
+                    setGenreSubmitted(false);
+                  }}
+                  className="mt-6 px-6 py-2 rounded bg-cyan-400 hover:bg-cyan-300 text-[#020408] font-arcade font-bold text-xs uppercase tracking-wider transition-colors"
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <form onSubmit={handleGenreSubmit} className="space-y-4">
+                <p className="text-xs font-code text-slate-400">
+                  Think a genre should be added to BEAT FREEZE? Let us know! Fill in the details below and include an example so we can check it out.
+                </p>
+
+                <div>
+                  <label className="block text-xs font-code text-slate-400 mb-1">
+                    Genre Name <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={genreName}
+                    onChange={(e) => setGenreName(e.target.value)}
+                    placeholder="e.g. Drum & Bass, House, Techno..."
+                    className="w-full px-3 py-2 rounded bg-[#020408] border border-cyan-500/30 font-code text-sm text-cyan-300 focus:outline-none focus:border-cyan-400"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-code text-slate-400 mb-1">
+                    Description (optional)
+                  </label>
+                  <textarea
+                    value={genreDescription}
+                    onChange={(e) => setGenreDescription(e.target.value)}
+                    placeholder="Tell us about this genre and why it should be added..."
+                    rows={3}
+                    className="w-full px-3 py-2 rounded bg-[#020408] border border-cyan-500/30 font-sans text-sm text-cyan-300 focus:outline-none focus:border-cyan-400 resize-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-code text-slate-400 mb-1">
+                    Example Link (YouTube or audio file) <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="url"
+                    required
+                    value={genreExampleUrl}
+                    onChange={(e) => setGenreExampleUrl(e.target.value)}
+                    placeholder="https://youtube.com/watch?v=..."
+                    className="w-full px-3 py-2 rounded bg-[#020408] border border-cyan-500/30 font-code text-sm text-cyan-300 focus:outline-none focus:border-cyan-400"
+                  />
+                  <p className="mt-1 text-[10px] font-code text-slate-500">
+                    Paste a YouTube link or a direct audio file URL as an example of this genre.
+                  </p>
+                </div>
+
+                {genreError && (
+                  <div className="p-3 rounded-lg bg-rose-950/60 border border-rose-500/40 text-rose-300 text-xs font-code">
+                    {genreError}
+                  </div>
+                )}
+
+                <div className="pt-3 border-t border-cyan-500/20 flex justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsGenreSuggestOpen(false)}
+                    className="px-4 py-2 rounded bg-slate-900 text-slate-400 font-code text-xs hover:text-white"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={genreSubmitting}
+                    className="px-5 py-2 rounded bg-cyan-400 hover:bg-cyan-300 text-[#020408] font-arcade font-bold text-xs uppercase tracking-wider flex items-center gap-2 transition-colors disabled:opacity-60"
+                  >
+                    {genreSubmitting ? (
+                      <>
+                        <Loader2 size={14} className="animate-spin" /> Sending...
+                      </>
+                    ) : (
+                      <>
+                        <Send size={14} /> Submit
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

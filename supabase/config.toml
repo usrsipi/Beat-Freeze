@@ -1,0 +1,2 @@
+[functions.genre-suggestion]
+verify_jwt = false

@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Room, BeatSubmission, UserProfile, BattleResult } from '../types/game';
 import { 
   Clock, Upload, Play, Pause, RotateCcw, Star, Trophy, 
-  CheckCircle2, Music, AlertCircle, FileAudio 
+  CheckCircle2, Music, AlertCircle, Scissors, Move
 } from 'lucide-react';
 import { audioEngine } from '../services/audioEngine';
 import { calculateBattleOutcomes, applyXpGain } from '../game/battleEngine';
@@ -22,32 +22,37 @@ export const BattleView: React.FC<BattleViewProps> = ({
   onBattleFinished,
   onReturnToLobby,
 }) => {
-  // Battle phases: 'crafting' | 'showcase' | 'podium'
   const [phase, setPhase] = useState<'crafting' | 'showcase' | 'podium'>('crafting');
 
   // Phase 1: Crafting / Submission state
   const [secondsLeft, setSecondsLeft] = useState<number>(room.roundTimerSeconds || 180);
-  const [totalTimerSeconds] = useState<number>(room.roundTimerSeconds || 180);
   const [trackTitle, setTrackTitle] = useState<string>('My SubZero Beat');
   const [hasNoAudio, setHasNoAudio] = useState<boolean>(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
-  const [waveformPeaks, setWaveformPeaks] = useState<number[]>(
-    audioEngine.generateFallbackPeaks('default_seed', 120)
-  );
+  const [waveformPeaks, setWaveformPeaks] = useState<number[]>([]);
   const [audioDuration, setAudioDuration] = useState<number>(45);
   const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
   const [isDecodingAudio, setIsDecodingAudio] = useState<boolean>(false);
   const [hasSubmitted, setHasSubmitted] = useState<boolean>(false);
+  const [hasUploadedAudio, setHasUploadedAudio] = useState<boolean>(false);
+
+  // Trim state
+  const [trimStart, setTrimStart] = useState<number>(0);
+  const [trimEnd, setTrimEnd] = useState<number>(45);
 
   // Phase 2: Showcase State
   const [submissions, setSubmissions] = useState<BeatSubmission[]>([]);
   const [currentShowcaseIndex, setCurrentShowcaseIndex] = useState<number>(0);
   const [userRating, setUserRating] = useState<number>(5);
-  const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+  const [countdownNumber, setCountdownNumber] = useState<number | null>(null);
+  const [isShowcasePlaying, setIsShowcasePlaying] = useState<boolean>(false);
+  const [showcaseFinished, setShowcaseFinished] = useState<boolean>(false);
 
   // Phase 3: Podium State
   const [results, setResults] = useState<BattleResult[]>([]);
+
+  const countdownTimerRef = useRef<number | null>(null);
 
   // Production countdown timer
   useEffect(() => {
@@ -68,6 +73,15 @@ export const BattleView: React.FC<BattleViewProps> = ({
     return () => clearInterval(timer);
   }, [phase]);
 
+  // Cleanup countdown timer on unmount
+  useEffect(() => {
+    return () => {
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+      }
+    };
+  }, []);
+
   // Audio file upload and real PCM decoding
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -77,42 +91,46 @@ export const BattleView: React.FC<BattleViewProps> = ({
     setUploadedFile(file);
     setTrackTitle(file.name.replace(/\.[^/.]+$/, ''));
     setHasNoAudio(false);
+    setHasUploadedAudio(true);
 
     try {
-      const decoded = await audioEngine.decodeAudioFile(file, 140);
+      const decoded = await audioEngine.decodeAudioFile(file, 200);
       setWaveformPeaks(decoded.peaks);
       setAudioDuration(decoded.duration);
       setAudioBlobUrl(decoded.audioUrl);
+      // Set trim to start at 0, end at min(duration, 45)
+      const endSec = Math.min(decoded.duration, 45);
+      setTrimStart(0);
+      setTrimEnd(endSec);
       audioEngine.playReadyUp();
     } catch {
-      // Fallback peaks
-      setWaveformPeaks(audioEngine.generateFallbackPeaks(file.name, 140));
+      setWaveformPeaks(audioEngine.generateFallbackPeaks(file.name, 200));
     } finally {
       setIsDecodingAudio(false);
     }
   };
 
-  // Toggle "Submit without audio"
   const handleToggleNoAudio = (checked: boolean) => {
     setHasNoAudio(checked);
     if (checked) {
       audioEngine.stopAudio();
-      setIsPlayingAudio(false);
+      setHasUploadedAudio(false);
+      setWaveformPeaks([]);
+      setAudioBlobUrl(null);
     }
     audioEngine.playUiClick();
   };
 
-  // Submit beat
   const handleSubmitBeat = () => {
     audioEngine.playReadyUp();
     setHasSubmitted(true);
   };
 
-  // Transition to Showcase
   const startShowcasePhase = () => {
     audioEngine.stopAudio();
-    setIsPlayingAudio(false);
     setElapsedSeconds(0);
+    setShowcaseFinished(false);
+    setIsShowcasePlaying(false);
 
     const userEntry: BeatSubmission = {
       id: `sub-${profile.id}`,
@@ -127,6 +145,8 @@ export const BattleView: React.FC<BattleViewProps> = ({
       waveformPeaks: hasNoAudio ? [] : waveformPeaks,
       audioBlobUrl: hasNoAudio ? undefined : (audioBlobUrl || undefined),
       hasNoAudio,
+      trimStartSeconds: hasNoAudio ? 0 : trimStart,
+      trimEndSeconds: hasNoAudio ? 45 : trimEnd,
       scores: [],
       averageRating: 0,
       cryoPointsEarned: 0,
@@ -135,66 +155,100 @@ export const BattleView: React.FC<BattleViewProps> = ({
     setSubmissions([userEntry]);
     setCurrentShowcaseIndex(0);
     setPhase('showcase');
+
+    // Start the 3-2-1 countdown automatically
+    startCountdown();
   };
 
-  // Audio playback controls for 45s showcase
-  const handleTogglePlay = () => {
-    if (hasNoAudio) return;
+  // 3-2-1 countdown before showcase audio plays
+  const startCountdown = () => {
+    setCountdownNumber(3);
+    setIsShowcasePlaying(false);
+    setShowcaseFinished(false);
+    setElapsedSeconds(0);
 
-    if (isPlayingAudio) {
-      audioEngine.stopAudio();
-      setIsPlayingAudio(false);
-    } else {
-      const currentSub = submissions[currentShowcaseIndex];
-      if (currentSub?.audioBlobUrl) {
-        setIsPlayingAudio(true);
-        audioEngine.playShowcaseAudio(
-          currentSub.audioBlobUrl,
-          (elapsed) => {
-            setElapsedSeconds(elapsed);
-          },
-          () => {
-            setIsPlayingAudio(false);
-          },
-          elapsedSeconds >= 45 ? 0 : elapsedSeconds
-        );
+    let count = 3;
+    countdownTimerRef.current = window.setInterval(() => {
+      count -= 1;
+      if (count > 0) {
+        setCountdownNumber(count);
+        audioEngine.playUiClick();
+      } else if (count === 0) {
+        setCountdownNumber(0);
+        audioEngine.playFreezeSound();
       } else {
-        // Mock 45s timer ticker for preview when no local audio was provided
-        setIsPlayingAudio(true);
-        const start = Date.now() - elapsedSeconds * 1000;
-        const tick = () => {
-          if (!audioEngine) return;
-          const nowElapsed = (Date.now() - start) / 1000;
-          if (nowElapsed >= 45) {
-            setElapsedSeconds(45);
-            setIsPlayingAudio(false);
-            return;
-          }
-          setElapsedSeconds(nowElapsed);
-          requestAnimationFrame(tick);
-        };
-        requestAnimationFrame(tick);
+        // Countdown finished — start audio playback
+        if (countdownTimerRef.current) {
+          clearInterval(countdownTimerRef.current);
+          countdownTimerRef.current = null;
+        }
+        setCountdownNumber(null);
+        startShowcasePlayback();
       }
+    }, 1000);
+  };
+
+  const startShowcasePlayback = () => {
+    const currentSub = submissions[currentShowcaseIndex];
+    if (!currentSub || currentSub.hasNoAudio) {
+      // No audio — skip to voting after a brief moment
+      setShowcaseFinished(true);
+      return;
+    }
+
+    setIsShowcasePlaying(true);
+
+    const trimS = currentSub.trimStartSeconds ?? 0;
+    const trimE = currentSub.trimEndSeconds ?? 45;
+
+    if (currentSub.audioBlobUrl) {
+      audioEngine.playShowcaseAudio(
+        currentSub.audioBlobUrl,
+        (elapsed) => {
+          setElapsedSeconds(elapsed);
+        },
+        () => {
+          setIsShowcasePlaying(false);
+          setShowcaseFinished(true);
+        },
+        0,
+        trimS,
+        trimE
+      );
+    } else {
+      // Mock ticker when no blob URL
+      setIsShowcasePlaying(true);
+      const start = Date.now();
+      const tick = () => {
+        const nowElapsed = (Date.now() - start) / 1000;
+        const playEnd = Math.min(trimE, 45) - trimS;
+        if (nowElapsed >= playEnd) {
+          setElapsedSeconds(playEnd);
+          setIsShowcasePlaying(false);
+          setShowcaseFinished(true);
+          return;
+        }
+        setElapsedSeconds(nowElapsed);
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
     }
   };
 
   const handleSeekWaveform = (targetSeconds: number) => {
-    if (hasNoAudio) return;
+    const currentSub = submissions[currentShowcaseIndex];
+    if (!currentSub || currentSub.hasNoAudio) return;
     setElapsedSeconds(targetSeconds);
-    if (isPlayingAudio && submissions[currentShowcaseIndex]?.audioBlobUrl) {
-      audioEngine.playShowcaseAudio(
-        submissions[currentShowcaseIndex].audioBlobUrl!,
-        (elapsed) => setElapsedSeconds(elapsed),
-        () => setIsPlayingAudio(false),
-        targetSeconds
-      );
-    }
   };
 
-  // Lock vote and reveal podium
+  const handleTrimChange = (start: number, end: number) => {
+    setTrimStart(start);
+    setTrimEnd(end);
+  };
+
   const handleLockVoteAndFinish = () => {
     audioEngine.stopAudio();
-    setIsPlayingAudio(false);
+    setIsShowcasePlaying(false);
     audioEngine.playFreezeSound();
 
     const updated = [...submissions];
@@ -232,6 +286,8 @@ export const BattleView: React.FC<BattleViewProps> = ({
     const sec = s % 60;
     return `${m}:${sec < 10 ? '0' : ''}${sec}`;
   };
+
+  const currentSub = submissions[currentShowcaseIndex];
 
   return (
     <div className="py-6 px-4 md:px-8 max-w-4xl mx-auto text-sky-100">
@@ -298,10 +354,12 @@ export const BattleView: React.FC<BattleViewProps> = ({
                 <label className="block text-xs font-code text-slate-400 mb-1">
                   Upload Audio File (.mp3, .wav, .ogg)
                 </label>
-                <label className="border-2 border-dashed border-cyan-500/40 hover:border-cyan-400 rounded-lg p-6 flex flex-col items-center justify-center text-center cursor-pointer bg-[#020408]/60 transition-colors">
+                <label className={`border-2 border-dashed rounded-lg p-6 flex flex-col items-center justify-center text-center cursor-pointer bg-[#020408]/60 transition-colors ${
+                  isDecodingAudio ? 'border-amber-400 animate-pulse' : 'border-cyan-500/40 hover:border-cyan-400'
+                }`}>
                   <Upload size={24} className="text-cyan-400 mb-2" />
                   <span className="font-arcade text-sm font-bold text-cyan-300 uppercase">
-                    {uploadedFile ? uploadedFile.name : 'Select or Drag Audio File'}
+                    {isDecodingAudio ? 'Decoding audio...' : uploadedFile ? uploadedFile.name : 'Select or Drag Audio File'}
                   </span>
                   <span className="text-[11px] font-code text-slate-400 mt-1">
                     {uploadedFile
@@ -318,40 +376,73 @@ export const BattleView: React.FC<BattleViewProps> = ({
               </div>
             )}
 
-            {/* Submit without audio option */}
-            <div className="pt-2">
-              <label className="flex items-center gap-3 cursor-pointer p-3 rounded bg-[#020408]/70 border border-slate-800 hover:border-cyan-500/30 transition-colors">
-                <input
-                  type="checkbox"
-                  checked={hasNoAudio}
-                  onChange={(e) => handleToggleNoAudio(e.target.checked)}
-                  className="w-4 h-4 rounded accent-cyan-400 cursor-pointer"
-                />
-                <div>
-                  <span className="font-arcade text-xs font-bold text-white uppercase tracking-wide">
+            {/* Submit without audio — improved toggle card */}
+            <div className="p-4 rounded-xl bg-[#020408] border border-slate-700 hover:border-cyan-500/30 transition-colors">
+              <button
+                onClick={() => handleToggleNoAudio(!hasNoAudio)}
+                className="w-full flex items-center gap-3 text-left"
+              >
+                <div className={`shrink-0 w-12 h-7 rounded-full p-1 transition-colors ${
+                  hasNoAudio ? 'bg-cyan-400' : 'bg-slate-700'
+                }`}>
+                  <div className={`w-5 h-5 rounded-full bg-white transition-transform ${
+                    hasNoAudio ? 'translate-x-5' : ''
+                  }`} />
+                </div>
+                <div className="flex-1">
+                  <span className="font-arcade text-sm font-bold text-white uppercase tracking-wide block">
                     Submit without audio track
                   </span>
-                  <span className="block text-[11px] font-code text-slate-400 mt-0.5">
-                    Submit your producer slot without uploading an audio file (e.g. title reservation or silent entry).
+                  <span className="text-[11px] font-code text-slate-400 mt-0.5 block">
+                    {hasNoAudio
+                      ? 'Your entry will be silent — just a title reservation.'
+                      : 'Toggle on to submit a silent entry without uploading an audio file.'}
                   </span>
                 </div>
-              </label>
+              </button>
             </div>
 
-            {/* Waveform Preview Display */}
-            <div>
-              <div className="flex items-center justify-between text-xs font-code text-slate-400 mb-1.5">
-                <span>Standstill Audio Waveform (DAW Amplitude Peaks)</span>
-                <span className="text-cyan-400">45s Showcase Limit Marker</span>
+            {/* Waveform Preview + Editor — only shown when audio is uploaded */}
+            {hasUploadedAudio && !hasNoAudio && waveformPeaks.length > 0 && (
+              <div>
+                <div className="flex items-center justify-between text-xs font-code text-slate-400 mb-1.5">
+                  <span className="flex items-center gap-1.5">
+                    <Scissors size={12} className="text-amber-400" /> Waveform Editor — Drag handles to trim
+                  </span>
+                  <span className="text-cyan-400 flex items-center gap-1">
+                    <Move size={12} /> 45s Showcase Limit
+                  </span>
+                </div>
+                <AudioWaveform
+                  peaks={waveformPeaks}
+                  progressSeconds={0}
+                  maxSeconds={45}
+                  totalDuration={audioDuration}
+                  hasNoAudio={false}
+                  isEditable={true}
+                  trimStartSeconds={trimStart}
+                  trimEndSeconds={trimEnd}
+                  onTrimChange={handleTrimChange}
+                />
+                <div className="mt-2 flex items-center justify-between text-[11px] font-code text-slate-500">
+                  <span>
+                    Playable: <strong className="text-cyan-300">{(trimEnd - trimStart).toFixed(1)}s</strong>
+                    {' '}(from {trimStart.toFixed(1)}s to {trimEnd.toFixed(1)}s)
+                  </span>
+                  <span className="text-amber-400">♪ Auto fade-out at cut point</span>
+                </div>
               </div>
-              <AudioWaveform
-                peaks={waveformPeaks}
-                progressSeconds={0}
-                maxSeconds={45}
-                totalDuration={audioDuration}
-                hasNoAudio={hasNoAudio}
-              />
-            </div>
+            )}
+
+            {/* Empty state when no audio uploaded yet and not in no-audio mode */}
+            {!hasUploadedAudio && !hasNoAudio && (
+              <div className="p-8 rounded-xl bg-[#020408] border border-dashed border-slate-700 text-center">
+                <Music size={32} className="text-slate-600 mx-auto mb-2" />
+                <p className="text-xs font-code text-slate-500">
+                  Upload an audio file to see the waveform and trim your 45-second showcase.
+                </p>
+              </div>
+            )}
 
             {/* Submit Button */}
             <div className="pt-3 border-t border-cyan-500/20">
@@ -382,7 +473,7 @@ export const BattleView: React.FC<BattleViewProps> = ({
       {/* ========================================================= */}
       {/* PHASE 2: ANONYMOUS SHOWCASE & 45s BLIND VOTING           */}
       {/* ========================================================= */}
-      {phase === 'showcase' && submissions.length > 0 && (
+      {phase === 'showcase' && currentSub && (
         <div className="space-y-6">
           <div className="p-6 md:p-8 rounded-xl bg-[#08101e] border border-cyan-500/40 cryo-card-shadow">
             {/* Header */}
@@ -392,11 +483,11 @@ export const BattleView: React.FC<BattleViewProps> = ({
                   ANONYMOUS SHOWCASE (45S MAX AUDIO CAP)
                 </span>
                 <h3 className="font-arcade text-2xl font-bold text-white uppercase mt-0.5">
-                  {submissions[currentShowcaseIndex].anonymousLabel}
+                  {currentSub.anonymousLabel}
                 </h3>
               </div>
               <div className="text-xs font-code text-slate-400 bg-[#020408] px-3 py-1 rounded border border-cyan-500/20">
-                Track 1 of {submissions.length}
+                Track {currentShowcaseIndex + 1} of {submissions.length}
               </div>
             </div>
 
@@ -404,89 +495,117 @@ export const BattleView: React.FC<BattleViewProps> = ({
             <div className="mt-5 p-4 rounded-lg bg-[#020408] border border-slate-800">
               <div className="flex items-center justify-between text-xs font-code text-slate-400 mb-2">
                 <span>
-                  Track Title: <strong className="text-cyan-300">{submissions[currentShowcaseIndex].trackTitle}</strong>
+                  Track Title: <strong className="text-cyan-300">{currentSub.trackTitle}</strong>
                 </span>
-                <span>{submissions[currentShowcaseIndex].genre} · {submissions[currentShowcaseIndex].hasNoAudio ? 'No Audio' : '45s Showcase'}</span>
+                <span>{currentSub.genre} · {currentSub.hasNoAudio ? 'No Audio' : '45s Showcase'}</span>
               </div>
 
-              {/* Real Standstill Audio Waveform (DAW vertical peaks across subtle grid) */}
+              {/* Waveform (read-only in showcase) */}
               <div className="my-3">
                 <AudioWaveform
-                  peaks={submissions[currentShowcaseIndex].waveformPeaks}
+                  peaks={currentSub.waveformPeaks}
                   progressSeconds={elapsedSeconds}
                   maxSeconds={45}
-                  totalDuration={submissions[currentShowcaseIndex].duration || 45}
-                  isPlaying={isPlayingAudio}
+                  totalDuration={currentSub.duration || 45}
                   onSeek={handleSeekWaveform}
-                  hasNoAudio={submissions[currentShowcaseIndex].hasNoAudio}
+                  hasNoAudio={currentSub.hasNoAudio}
+                  trimStartSeconds={currentSub.trimStartSeconds}
+                  trimEndSeconds={currentSub.trimEndSeconds}
                 />
               </div>
 
-              {/* Playback Controls */}
+              {/* Playback status — no play button, auto-plays after countdown */}
               <div className="flex items-center justify-between pt-2">
-                <button
-                  onClick={handleTogglePlay}
-                  disabled={submissions[currentShowcaseIndex].hasNoAudio}
-                  className={`px-5 py-2 rounded font-arcade text-xs font-bold uppercase flex items-center gap-2 transition-colors ${
-                    submissions[currentShowcaseIndex].hasNoAudio
-                      ? 'bg-slate-900 text-slate-600 cursor-not-allowed'
-                      : isPlayingAudio
-                      ? 'bg-rose-500 text-white'
-                      : 'bg-cyan-400 hover:bg-cyan-300 text-[#020408]'
-                  }`}
-                >
-                  {isPlayingAudio ? <Pause size={14} /> : <Play size={14} />}
-                  {isPlayingAudio ? 'PAUSE' : 'PLAY SHOWCASE (45S)'}
-                </button>
-
                 <div className="text-xs font-code text-slate-400">
-                  {submissions[currentShowcaseIndex].hasNoAudio ? (
+                  {currentSub.hasNoAudio ? (
                     <span className="text-amber-400">[Silent Entry]</span>
-                  ) : (
-                    <span>
-                      Playback: <strong className="text-cyan-300">{Math.floor(elapsedSeconds)}s</strong> / 45s Cap
+                  ) : showcaseFinished ? (
+                    <span className="text-emerald-400 flex items-center gap-1">
+                      <CheckCircle2 size={14} /> Showcase finished
                     </span>
+                  ) : countdownNumber !== null ? (
+                    <span className="text-cyan-300">Starting showcase...</span>
+                  ) : isShowcasePlaying ? (
+                    <span>
+                      Now Playing: <strong className="text-cyan-300">{Math.floor(elapsedSeconds)}s</strong> / 45s
+                    </span>
+                  ) : (
+                    <span>Ready to play</span>
                   )}
                 </div>
               </div>
             </div>
 
-            {/* 1 to 5 Frost Stars Rating */}
-            <div className="mt-8 text-center">
-              <div className="text-xs font-code text-slate-400 uppercase tracking-widest mb-2">
-                Rate Anonymous Beat (1 - 5 Frost Stars)
+            {/* 3-2-1 Countdown Overlay */}
+            {countdownNumber !== null && !currentSub.hasNoAudio && (
+              <div className="mt-6 flex flex-col items-center justify-center py-12">
+                <div className="text-xs font-code text-slate-400 uppercase tracking-widest mb-4">
+                  {countdownNumber > 0 ? 'Showcase starts in' : 'Now playing'}
+                </div>
+                <div
+                  key={countdownNumber}
+                  className="font-arcade text-7xl md:text-8xl font-black text-white cryo-glow-text animate-[countdownPulse_1s_ease-in-out]"
+                  style={{
+                    color: countdownNumber === 0 ? '#34d399' : '#00f5ff',
+                  }}
+                >
+                  {countdownNumber > 0 ? countdownNumber : '♪'}
+                </div>
               </div>
-              <div className="flex items-center justify-center gap-3">
-                {[1, 2, 3, 4, 5].map((star) => (
-                  <button
-                    key={star}
-                    onClick={() => {
-                      setUserRating(star);
-                      audioEngine.playStarVote(star);
-                    }}
-                    className={`p-2 transition-transform hover:scale-125 ${
-                      star <= userRating ? 'text-cyan-400 drop-shadow-[0_0_8px_rgba(0,245,255,0.8)]' : 'text-slate-700'
-                    }`}
-                    aria-label={`Rate ${star} Stars`}
-                  >
-                    <Star size={36} fill={star <= userRating ? '#00f5ff' : 'none'} />
-                  </button>
-                ))}
-              </div>
-              <div className="mt-2 font-arcade text-lg font-bold text-cyan-300">
-                {userRating} / 5 Frost Stars
-              </div>
-            </div>
+            )}
 
-            {/* Finish & Reveal Podium CTA */}
-            <div className="mt-8 pt-4 border-t border-cyan-500/20 flex justify-end">
-              <button
-                onClick={handleLockVoteAndFinish}
-                className="px-8 py-3 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-[#020408] font-arcade font-extrabold text-sm uppercase tracking-wider transition-all cryo-card-shadow-sm flex items-center gap-2"
-              >
-                <span>LOCK VOTE & REVEAL RESULTS</span>
-              </button>
-            </div>
+            {/* 1 to 5 Frost Stars Rating — shown after showcase finishes or immediately for silent entries */}
+            {(showcaseFinished || currentSub.hasNoAudio) && countdownNumber === null && (
+              <div className="mt-8 text-center animate-in fade-in duration-300">
+                <div className="text-xs font-code text-slate-400 uppercase tracking-widest mb-2">
+                  Rate Anonymous Beat (1 - 5 Frost Stars)
+                </div>
+                <div className="flex items-center justify-center gap-3">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      onClick={() => {
+                        setUserRating(star);
+                        audioEngine.playStarVote(star);
+                      }}
+                      className={`p-2 transition-transform hover:scale-125 ${
+                        star <= userRating ? 'text-cyan-400 drop-shadow-[0_0_8px_rgba(0,245,255,0.8)]' : 'text-slate-700'
+                      }`}
+                      aria-label={`Rate ${star} Stars`}
+                    >
+                      <Star size={36} fill={star <= userRating ? '#00f5ff' : 'none'} />
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-2 font-arcade text-lg font-bold text-cyan-300">
+                  {userRating} / 5 Frost Stars
+                </div>
+
+                {/* Finish & Reveal Podium CTA */}
+                <div className="mt-6 pt-4 border-t border-cyan-500/20 flex justify-center">
+                  <button
+                    onClick={handleLockVoteAndFinish}
+                    className="px-8 py-3 rounded-lg bg-cyan-400 hover:bg-cyan-300 text-[#020408] font-arcade font-extrabold text-sm uppercase tracking-wider transition-all cryo-card-shadow-sm flex items-center gap-2"
+                  >
+                    <span>LOCK VOTE & REVEAL RESULTS</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Waiting state during playback */}
+            {!showcaseFinished && !currentSub.hasNoAudio && countdownNumber === null && isShowcasePlaying && (
+              <div className="mt-6 text-center py-4">
+                <div className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-950/50 border border-cyan-500/30 text-cyan-300 font-code text-xs">
+                  <div className="flex gap-1">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                  </div>
+                  Listening to showcase... Rating unlocks after playback
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -543,6 +662,14 @@ export const BattleView: React.FC<BattleViewProps> = ({
           </div>
         </div>
       )}
+
+      <style>{`
+        @keyframes countdownPulse {
+          0% { transform: scale(0.5); opacity: 0; }
+          50% { transform: scale(1.2); opacity: 1; }
+          100% { transform: scale(1); opacity: 1; }
+        }
+      `}</style>
     </div>
   );
 };

@@ -67,9 +67,11 @@ export interface BeatSubmission {
   genre: BattleGenre;
   duration: number; // Total seconds of audio file
   playLimitSeconds: number; // 45 seconds max per battle round showcase
-  waveformPeaks: number[]; // Extracted audio waveform amplitude peaks (e.g. 120 bars)
+  waveformPeaks: number[]; // Extracted audio waveform amplitude peaks
   audioBlobUrl?: string; // Real uploaded audio object URL if available
   hasNoAudio: boolean; // Option to submit without audio
+  trimStartSeconds?: number; // Start of the playable trim window
+  trimEndSeconds?: number; // End of the playable trim window
   scores: {
     voterId: string;
     rating: number; // 1 - 5 stars
