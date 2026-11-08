@@ -1,0 +1,6 @@
+{
+  "name": "Beat Freeze - Competitive Cyber-Arcade Music Producer Battles",
+  "description": "High-octane competitive online music producer game with cryo-arcade aesthetics, real-time battle lobbies, Web Audio kit synthesis, anonymous blind voting, and live podium reveals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

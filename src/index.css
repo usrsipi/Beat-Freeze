@@ -1,0 +1,86 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --font-arcade: 'Chakra Petch', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  }
+  
+  body {
+    background-color: #020408;
+    color: #e0f2fe;
+    font-family: var(--font-sans);
+    overflow-x: hidden;
+  }
+}
+
+/* Cyber-Arcade Cryo Custom Classes */
+.font-arcade {
+  font-family: 'Chakra Petch', system-ui, sans-serif;
+}
+
+.font-code {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* CRT Cold-Cathode Scanlines */
+.crt-overlay {
+  background: linear-gradient(
+    rgba(18, 28, 48, 0) 50%, 
+    rgba(0, 245, 255, 0.025) 50%
+  ), linear-gradient(
+    90deg,
+    rgba(255, 0, 0, 0.01),
+    rgba(0, 255, 0, 0.005),
+    rgba(0, 0, 255, 0.01)
+  );
+  background-size: 100% 4px, 6px 100%;
+  pointer-events: none;
+}
+
+/* Cryo Grid Mesh Background */
+.cryo-grid {
+  background-image: 
+    linear-gradient(to right, rgba(0, 245, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0, 245, 255, 0.06) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Neo-brutalist Pixel Ice Shadows */
+.cryo-card-shadow {
+  box-shadow: -4px 4px 0px 0px #00f5ff;
+}
+
+.cryo-card-shadow-sm {
+  box-shadow: -2px 2px 0px 0px #00f5ff;
+}
+
+.cryo-card-shadow-purple {
+  box-shadow: -4px 4px 0px 0px #818cf8;
+}
+
+.cryo-glow-text {
+  text-shadow: 0 0 12px rgba(0, 245, 255, 0.65), 0 0 24px rgba(0, 245, 255, 0.35);
+}
+
+.cryo-subzero-glow {
+  text-shadow: 0 0 16px rgba(56, 189, 248, 0.8), 0 0 32px rgba(99, 102, 241, 0.5);
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #020408;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 245, 255, 0.3);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 245, 255, 0.6);
+}
